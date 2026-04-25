@@ -1,15 +1,36 @@
 {
   "name": "election_process_education_1",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Multilingual Election Intelligence Assistant for Indian Voters",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "node --watch server.js",
+    "test": "jest --forceExit --detectOpenHandles",
+    "test:coverage": "jest --coverage --forceExit --detectOpenHandles"
   },
-  "keywords": [],
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/*.test.js"
+    ],
+    "testTimeout": 15000
+  },
+  "keywords": [
+    "election",
+    "india",
+    "fact-check",
+    "ai",
+    "multilingual",
+    "telugu",
+    "hindi",
+    "eci"
+  ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "@google-cloud/speech": "^7.3.0",
     "@google-cloud/text-to-speech": "^6.4.0",
@@ -21,5 +42,9 @@
     "express-rate-limit": "^8.4.1",
     "multer": "^2.1.1",
     "node-cache": "^5.1.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.1.3"
   }
 }

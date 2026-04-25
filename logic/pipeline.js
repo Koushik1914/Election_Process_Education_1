@@ -1,251 +1,428 @@
-const aiService = require('../services/ai_service');
+/**
+ * JanVoice AI — Main Processing Pipeline
+ * ────────────────────────────────────────
+ * Flow:
+ *   1. Detect intent  → VERIFY | GUIDE | LEARN | VENT | GREETING
+ *   2. Extract claim  → normalize + language detection
+ *   3. Route          → dedicated handler per intent
+ *   4. Format         → structured response + shareable card
+ *
+ * Designed for Indian voters: supports Telugu, Hindi, English, Tanglish.
+ */
 
-// ===============================
-// 🔧 Utility Functions
-// ===============================
+'use strict';
 
+let aiService;
+try {
+    aiService = require('../services/ai_service');
+} catch (e) {
+    // Allow pipeline to be loaded in test environments without real AI service
+    console.warn('[Pipeline] AI service not available:', e.message);
+    aiService = null;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// UTILITY HELPERS
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Strip common filler words and punctuation for claim normalization.
+ * @param {string} text
+ * @returns {string}
+ */
 function normalizeClaim(text) {
     return text
         .toLowerCase()
-        .replace(/\?/g, "")
-        .replace(/anta|ah|na/gi, "")
-        .replace(/\s+/g, " ")
+        .replace(/[?!]/g, '')
+        .replace(/\b(anta|ah|na|kda|ra|le|ga)\b/gi, '')
+        .replace(/\s+/g, ' ')
         .trim();
 }
 
+/**
+ * Detect simple greeting patterns across supported languages.
+ * @param {string} text
+ * @returns {boolean}
+ */
 function isGreeting(text) {
-    return /^(hi|hello|hey|namaste|vanakkam)/i.test(text.trim());
+    return /^(hi|hello|hey|namaste|vanakkam|namaskar|hola)\b/i.test(text.trim());
 }
 
+/** Election-domain keywords (English + common Telugu/Hindi transliterations). */
 const ELECTION_KEYWORDS = [
-    "evm", "vote", "voting", "election", "booth",
-    "poll", "eci", "candidate", "ballot",
-    "hack", "fraud", "rigged", "result"
+    'evm', 'vote', 'voting', 'election', 'booth', 'poll', 'eci',
+    'candidate', 'ballot', 'hack', 'fraud', 'rigged', 'result',
+    'matadanam', 'chunav', 'matadan', 'praja'
 ];
 
+/**
+ * Check whether the text relates to elections at all.
+ * @param {string} text
+ * @returns {boolean}
+ */
 function mentionsElection(text) {
-    const t = text.toLowerCase();
-    return ELECTION_KEYWORDS.some(k => t.includes(k));
+    const lower = text.toLowerCase();
+    return ELECTION_KEYWORDS.some(k => lower.includes(k));
 }
 
-// ✅ STRONG GUIDE DETECTION (FIXED)
+/**
+ * Detect guide/how-to queries in English, Telugu, and Hindi.
+ * Matches: where, how to, vote, register, ekkada (Telugu for 'where'),
+ *          kaha (Hindi for 'where'), process, booth location, etc.
+ * @param {string} text
+ * @returns {boolean}
+ */
 function isGuideQuery(text) {
     const t = text.toLowerCase();
-
     return (
-        t.includes("where") ||
-        t.includes("ekkada") ||
-        t.includes("kaha") ||
-        t.includes("how to vote") ||
-        t.includes("how to") ||
-        t.includes("process") ||
-        t.includes("register") ||
-        t.includes("vote")
+        t.includes('where') ||
+        t.includes('ekkada') ||   // Telugu: where
+        t.includes('kaha') ||     // Hindi: where
+        t.includes('kahan') ||    // Hindi variant
+        t.includes('how to vote') ||
+        t.includes('how to') ||
+        t.includes('process') ||
+        t.includes('register') ||
+        t.includes('booth') ||
+        t.includes('polling')
     );
 }
 
-// ===============================
-// 🔥 Demo Reliability Layer
-// ===============================
+/**
+ * Detect emotional/vent intent.
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isVentQuery(text) {
+    const t = text.toLowerCase();
+    return (
+        t.includes('cheat') || t.includes('unfair') || t.includes('angry') ||
+        t.includes('worried') || t.includes('scared') || t.includes('trust') ||
+        t.includes('fear') || t.includes('betrayed')
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PREDEFINED FACT DATABASE (Demo Reliability Layer)
+// Ensures consistent, fast answers for the most common Indian election claims.
+// ════════════════════════════════════════════════════════════════════════════
 
 const PREDEFINED_FACTS = {
     evm: {
-        verdict: "FALSE",
+        verdict: 'FALSE',
         confidence: 99,
-        claim: "EVMs are hacked.",
-        fact: "EVMs are standalone machines with no wireless communication capabilities.",
-        source: "Election Commission of India (ECI)",
-        source_url: "https://www.eci.gov.in/evm/",
-        explanation: "Indian EVMs are not connected to any network and cannot be hacked remotely.",
-        spread_reason: "Fear and misunderstanding of EVM technology.",
-        action: "Check official ECI resources for clarity."
+        claim: 'EVMs are hacked / rigged.',
+        fact: 'Indian EVMs are standalone machines with no Wi-Fi, Bluetooth, or internet connectivity and cannot be hacked remotely.',
+        source: 'Election Commission of India (ECI)',
+        source_url: 'https://www.eci.gov.in/evm/',
+        explanation:
+            'EVMs store votes in a chip with no external communication port. The Supreme Court of India has repeatedly upheld their integrity after extensive technical scrutiny.',
+        spread_reason: 'Fear and misunderstanding of EVM technology amplified by social media forwards.',
+        action: 'Visit eci.gov.in/evm for official technical documentation and FAQs.'
+    },
+    voter_id: {
+        verdict: 'TRUE',
+        confidence: 95,
+        claim: 'You need a valid ID to vote.',
+        fact: 'Voters must carry one of 12 approved photo IDs (Voter ID card, Aadhaar, Passport, etc.).',
+        source: 'Election Commission of India (ECI)',
+        source_url: 'https://www.eci.gov.in',
+        explanation:
+            'The ECI accepts 12 alternative photo IDs if the Voter ID card is unavailable. EPIC (Voter ID card) is the primary document.',
+        spread_reason: 'Confusion about which documents are accepted.',
+        action: 'Carry your Voter ID or any government-issued photo ID on polling day.'
     }
 };
 
-// ===============================
-// 🔧 SAFE TEXT EXTRACTION
-// ===============================
+// ════════════════════════════════════════════════════════════════════════════
+// SAFE EXTRACTION HELPERS
+// ════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Safely extract text from a Vertex AI response object.
+ * @param {object} result - Raw Vertex AI response
+ * @returns {string}
+ */
 function safeText(result) {
     try {
-        return result.response.candidates[0].content.parts[0].text;
+        return result.response.candidates[0].content.parts[0].text || '';
     } catch {
-        return "Sorry, I couldn't process that right now. Please try again.";
+        return '';
     }
 }
 
-// ===============================
-// 🚀 MAIN PIPELINE
-// ===============================
+// ════════════════════════════════════════════════════════════════════════════
+// MAIN ENTRY POINT
+// ════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Process any user input through the full AI pipeline.
+ * @param {string} text - Raw user message
+ * @returns {Promise<object>} Structured response object
+ */
 async function processText(text) {
     try {
-        const lowerText = text.toLowerCase().trim();
+        const lower = text.toLowerCase().trim();
 
-        // Greeting
-        if (isGreeting(lowerText)) {
+        // ── Step 1: Handle greetings immediately ──────────────────────────
+        if (isGreeting(lower)) {
             return {
-                response: "Hi! I can verify election claims, help you find your polling booth, or explain the voting process. What would you like to do?",
-                intent: "GREETING"
+                response:
+                    'Namaste! 🙏 I am JanVoice AI — your trusted election companion.\n\n' +
+                    'I can help you:\n' +
+                    '✅ Verify election claims and WhatsApp forwards\n' +
+                    '🗳️ Find your polling booth and voting steps\n' +
+                    '📚 Learn about the Indian election process\n\n' +
+                    'What would you like to know?',
+                intent: 'GREETING'
             };
         }
 
-        // Extract claim
-        let extraction = await aiService.extractClaim(text);
+        // ── Step 2: Determine intent ──────────────────────────────────────
+        let intent = 'VERIFY'; // default
 
-        if (!extraction || !extraction.claim) {
-            if (mentionsElection(text)) {
-                extraction = {
-                    claim: normalizeClaim(text),
-                    confidence: 0.5,
-                    language: "mixed"
-                };
+        if (isGuideQuery(lower)) {
+            intent = 'GUIDE';
+        } else if (isVentQuery(lower)) {
+            intent = 'VENT';
+        } else if (aiService) {
+            // Use AI service for nuanced intent detection when available
+            try {
+                const analysis = await aiService.analyzeMessage(text);
+                if (analysis?.intent && analysis.intent !== 'UNKNOWN') {
+                    intent = analysis.intent;
+                }
+                // Override AI if strong signals present
+                if (isGuideQuery(lower)) intent = 'GUIDE';
+            } catch (e) {
+                console.warn('[Pipeline] AI intent detection failed, using heuristics.');
+            }
+        } else if (!mentionsElection(lower)) {
+            // No AI available and not election-related
+            return {
+                response: 'I specialize in Indian election information. Please ask me about voting, EVMs, election procedures, or fact-checking election claims.',
+                intent: 'OUT_OF_SCOPE'
+            };
+        }
+
+        // ── Step 3: Extract claim (best-effort) ───────────────────────────
+        let extraction = null;
+        if (aiService && intent === 'VERIFY') {
+            try {
+                extraction = await aiService.extractClaim(text);
+            } catch (e) {
+                console.warn('[Pipeline] Claim extraction failed:', e.message);
+            }
+            if (!extraction?.claim && mentionsElection(lower)) {
+                extraction = { claim: normalizeClaim(text), confidence: 0.5, language: 'mixed' };
             }
         }
 
-        const analysis = await aiService.analyzeMessage(text);
-
-        if (extraction?.language) {
-            analysis.language = extraction.language;
+        // ── Step 4: Route to handler ──────────────────────────────────────
+        switch (intent) {
+            case 'GUIDE':  return await handleGuide(text);
+            case 'LEARN':  return await handleLearn(text);
+            case 'VENT':   return await handleVent(text);
+            case 'VERIFY':
+            default:       return await handleVerify(text, extraction);
         }
 
-        // ✅ FIXED INTENT LOGIC
-        if (isGuideQuery(text)) {
-            analysis.intent = "GUIDE";
-        } else if (analysis.intent === "UNKNOWN") {
-            if (mentionsElection(text)) {
-                analysis.intent = "VERIFY";
-            }
-        }
-
-        // Routing
-        switch (analysis.intent) {
-            case "VERIFY":
-                return await handleVerify(text, analysis, extraction);
-            case "GUIDE":
-                return await handleGuide(text, analysis);
-            case "LEARN":
-                return await handleLearn(text, analysis);
-            case "VENT":
-                return await handleVent(text, analysis);
-            default:
-                return await handleVerify(text, analysis, extraction);
-        }
-
-    } catch (e) {
-        console.error("Pipeline error:", e);
+    } catch (err) {
+        console.error('[Pipeline] Unhandled error:', err);
         return {
-            response: "Something went wrong. Please try again.",
-            intent: "ERROR"
+            response: 'Something went wrong. Please try again.',
+            intent: 'ERROR'
         };
     }
 }
 
-// ===============================
-// 🔍 VERIFY HANDLER
-// ===============================
+// ════════════════════════════════════════════════════════════════════════════
+// INTENT HANDLERS
+// ════════════════════════════════════════════════════════════════════════════
 
-async function handleVerify(text, analysis, extraction) {
-
+/**
+ * VERIFY — Fact-check an election claim.
+ */
+async function handleVerify(text, extraction) {
     const normalized = normalizeClaim(text);
 
+    // ── Fast path: predefined facts ───────────────────────────────────────
     if (
-        normalized.includes("evm") &&
-        (normalized.includes("hack") ||
-            normalized.includes("safe") ||
-            normalized.includes("rigged") ||
-            normalized.includes("fraud"))
+        normalized.includes('evm') &&
+        (normalized.includes('hack') || normalized.includes('safe') ||
+         normalized.includes('rig') || normalized.includes('fraud'))
     ) {
-        return formatVerifyResponse(PREDEFINED_FACTS.evm, analysis);
+        return formatVerifyResponse(PREDEFINED_FACTS.evm);
     }
 
+    if (normalized.includes('voter id') || normalized.includes('id proof')) {
+        return formatVerifyResponse(PREDEFINED_FACTS.voter_id);
+    }
+
+    // ── AI-powered verification ───────────────────────────────────────────
     if (!extraction?.claim) {
         return {
-            response: "Could you share the exact claim you want me to verify?",
-            intent: "VERIFY"
+            response: 'Could you share the exact claim you want me to verify? For example: "EVMs are hacked" or "voting age is 21".',
+            intent: 'VERIFY'
         };
     }
 
-    const factCheck = await aiService.verifyClaim(
-        extraction.claim,
-        analysis.language
-    );
+    if (!aiService) {
+        return {
+            response: `I couldn't verify "${extraction.claim}" right now. Please check the official ECI website at eci.gov.in for accurate information.`,
+            intent: 'VERIFY'
+        };
+    }
 
-    return formatVerifyResponse(factCheck, analysis);
+    try {
+        const factCheck = await aiService.verifyClaim(extraction.claim, extraction.language || 'en');
+        return formatVerifyResponse(factCheck);
+    } catch (e) {
+        console.error('[handleVerify] AI verification failed:', e);
+        return {
+            response: 'Verification service is temporarily unavailable. Please visit eci.gov.in for official information.',
+            intent: 'VERIFY'
+        };
+    }
 }
 
-// ===============================
-// 🎯 RESPONSE FORMATTER
-// ===============================
+/**
+ * GUIDE — Explain how to vote / find booth / etc.
+ */
+async function handleGuide(text) {
+    // Static fallback (always works, even without AI)
+    const staticGuide =
+        '🗳️ **How to Vote in India — Step by Step**\n\n' +
+        '1️⃣  **Check your name** on the voter list at voters.eci.gov.in\n' +
+        '2️⃣  **Find your polling booth** using the Voter Helpline App or 1950\n' +
+        '3️⃣  **Carry a valid photo ID** (Voter ID, Aadhaar, Passport, etc.)\n' +
+        '4️⃣  **Go to your booth** between 7 AM – 6 PM on polling day\n' +
+        '5️⃣  **Show your ID** to the polling officer\n' +
+        '6️⃣  **Press the button** next to your chosen candidate on the EVM\n' +
+        '7️⃣  **Collect your VVPAT slip** (visible for 7 seconds) to confirm\n\n' +
+        '📞 Voter Helpline: **1950**\n' +
+        '🌐 Official site: **voters.eci.gov.in**';
 
-function formatVerifyResponse(data, analysis) {
+    if (!aiService) {
+        return { response: staticGuide, intent: 'GUIDE' };
+    }
 
-    const verdictEmoji = {
-        TRUE: "✅",
-        FALSE: "❌",
-        MISLEADING: "⚠️",
-        UNVERIFIABLE: "🔍"
-    }[data.verdict] || "🔍";
+    try {
+        const prompt =
+            `You are a friendly Indian election guide. Explain step-by-step how to vote in India ` +
+            `in simple, clear language. Include: how to check voter list, find polling booth, ` +
+            `valid IDs accepted, and what happens inside the booth. ` +
+            `Always mention voters.eci.gov.in and helpline 1950. Keep it under 200 words. ` +
+            `User asked: "${text}"`;
+
+        const result = await aiService.generativeModel.generateContent(prompt);
+        const aiText = safeText(result);
+        return { response: aiText || staticGuide, intent: 'GUIDE' };
+    } catch (e) {
+        console.error('[handleGuide] AI error, using static fallback:', e.message);
+        return { response: staticGuide, intent: 'GUIDE' };
+    }
+}
+
+/**
+ * LEARN — Election education / civic awareness.
+ */
+async function handleLearn(text) {
+    const staticLearn =
+        '📚 **About Indian Elections**\n\n' +
+        'India conducts the world\'s largest democratic elections.\n\n' +
+        '• The **Election Commission of India (ECI)** is an independent body that oversees all elections.\n' +
+        '• **Lok Sabha** elections happen every 5 years; **State Assembly** elections vary by state.\n' +
+        '• Citizens aged **18+** who are registered voters can vote.\n' +
+        '• The **NOTA** option (None of the Above) is available on EVMs.\n' +
+        '• **Model Code of Conduct** kicks in as soon as elections are announced.\n\n' +
+        '🌐 Learn more: **eci.gov.in**';
+
+    if (!aiService) {
+        return { response: staticLearn, intent: 'LEARN' };
+    }
+
+    try {
+        const result = await aiService.generativeModel.generateContent(
+            `Explain this election topic simply for an Indian voter, under 150 words: "${text}"`
+        );
+        const aiText = safeText(result);
+        return { response: aiText || staticLearn, intent: 'LEARN' };
+    } catch (e) {
+        return { response: staticLearn, intent: 'LEARN' };
+    }
+}
+
+/**
+ * VENT — Calm reassurance for frustrated / worried voters.
+ */
+async function handleVent(text) {
+    const staticVent =
+        'I understand your concern — election anxiety is very common. 🙏\n\n' +
+        'Your vote is protected by law and the Constitution of India. ' +
+        'The Election Commission is an independent body that works hard to ensure free and fair elections.\n\n' +
+        'If you witness any malpractice, you can:\n' +
+        '📞 Call **1950** (Voter Helpline)\n' +
+        '📱 Use the **cVIGIL App** to report violations with photo/video\n\n' +
+        'Your voice matters. Democracy is stronger when citizens like you participate.';
+
+    if (!aiService) {
+        return { response: staticVent, intent: 'VENT' };
+    }
+
+    try {
+        const result = await aiService.generativeModel.generateContent(
+            `You are a calm, empathetic Indian election counsellor. ` +
+            `Respond with reassurance and direct them to official resources. Under 100 words. ` +
+            `User says: "${text}"`
+        );
+        const aiText = safeText(result);
+        return { response: aiText || staticVent, intent: 'VENT' };
+    } catch (e) {
+        return { response: staticVent, intent: 'VENT' };
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RESPONSE FORMATTER
+// ════════════════════════════════════════════════════════════════════════════
+
+const VERDICT_EMOJI = { TRUE: '✅', FALSE: '❌', MISLEADING: '⚠️', UNVERIFIABLE: '🔍' };
+
+/**
+ * Convert a fact-check data object into a structured API response
+ * including a shareable WhatsApp-style card.
+ * @param {object} data
+ * @returns {object}
+ */
+function formatVerifyResponse(data) {
+    const emoji = VERDICT_EMOJI[data.verdict] || '🔍';
+
+    const card = [
+        '─────────────────────────',
+        `${emoji} VERDICT: ${data.verdict}`,
+        `📋 Claim: ${data.claim}`,
+        `📌 Fact: ${data.fact}`,
+        `🏛️ Source: ${data.source}`,
+        data.source_url ? `🔗 ${data.source_url}` : null,
+        '─────────────────────────',
+        '🤖 Verified by JanVoice AI | eci.gov.in'
+    ].filter(Boolean).join('\n');
 
     return {
         verdict: data.verdict,
-        response: `${data.explanation}\n\nWhat to do: ${data.action}`,
-        card: `
----CARD START---
-${verdictEmoji} ${data.verdict}
-Claim: ${data.claim}
-Fact: ${data.fact}
-Source: ${data.source}
----CARD END---
-        `.trim()
+        confidence: data.confidence || null,
+        response: `${data.explanation}\n\n💡 What to do: ${data.action}`,
+        card,
+        source: data.source,
+        source_url: data.source_url || null,
+        intent: 'VERIFY'
     };
 }
 
-// ===============================
-// 📚 SAFE HANDLERS (FIXED)
-// ===============================
-
-async function handleGuide(text, analysis) {
-    try {
-        const prompt = `Explain step-by-step how to vote in India in simple language. Include voters.eci.gov.in.`;
-        const result = await aiService.generativeModel.generateContent(prompt);
-
-        return {
-            response: safeText(result),
-            intent: "GUIDE"
-        };
-    } catch (e) {
-        console.error("Guide error:", e);
-
-        return {
-            response:
-                "Here’s how to vote:\n1. Find your polling booth at voters.eci.gov.in\n2. Carry valid ID\n3. Press button on EVM\n4. Confirm your vote",
-            intent: "GUIDE"
-        };
-    }
-}
-
-async function handleLearn(text, analysis) {
-    try {
-        const result = await aiService.generativeModel.generateContent(
-            `Explain simply: ${text}`
-        );
-        return { response: safeText(result), intent: "LEARN" };
-    } catch {
-        return { response: "Learning info not available right now.", intent: "LEARN" };
-    }
-}
-
-async function handleVent(text, analysis) {
-    try {
-        const result = await aiService.generativeModel.generateContent(
-            `Respond calmly: ${text}`
-        );
-        return { response: safeText(result), intent: "VENT" };
-    } catch {
-        return { response: "I understand your concern. Please check official sources.", intent: "VENT" };
-    }
-}
+// ════════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ════════════════════════════════════════════════════════════════════════════
 
 module.exports = {
     processText,
