@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * JanVoice AI — Main Processing Pipeline
  * ────────────────────────────────────────
@@ -10,14 +12,17 @@
  * Designed for Indian voters: supports Telugu, Hindi, English, Tanglish.
  */
 
-'use strict';
-
 let aiService;
 try {
     aiService = require('../services/ai_service');
 } catch (e) {
     // Allow pipeline to be loaded in test environments without real AI service
-    console.warn('[Pipeline] AI service not available:', e.message);
+    process.stdout.write(JSON.stringify({
+        ts: new Date().toISOString(),
+        level: 'WARN',
+        context: 'PipelineInit',
+        message: 'AI service not available: ' + e.message
+    }) + '\n');
     aiService = null;
 }
 
@@ -27,10 +32,11 @@ try {
 
 /**
  * Strip common filler words and punctuation for claim normalization.
- * @param {string} text
- * @returns {string}
+ * @param {string} text - Input text
+ * @returns {string} Normalized text
  */
 function normalizeClaim(text) {
+    if (!text) return '';
     return text
         .toLowerCase()
         .replace(/[?!]/g, '')
@@ -41,8 +47,8 @@ function normalizeClaim(text) {
 
 /**
  * Detect simple greeting patterns across supported languages.
- * @param {string} text
- * @returns {boolean}
+ * @param {string} text - Input text
+ * @returns {boolean} True if text is a greeting
  */
 function isGreeting(text) {
     return /^(hi|hello|hey|namaste|vanakkam|namaskar|hola)\b/i.test(text.trim());
@@ -57,8 +63,8 @@ const ELECTION_KEYWORDS = [
 
 /**
  * Check whether the text relates to elections at all.
- * @param {string} text
- * @returns {boolean}
+ * @param {string} text - Input text
+ * @returns {boolean} True if election-related
  */
 function mentionsElection(text) {
     const lower = text.toLowerCase();
@@ -69,8 +75,8 @@ function mentionsElection(text) {
  * Detect guide/how-to queries in English, Telugu, and Hindi.
  * Matches: where, how to, vote, register, ekkada (Telugu for 'where'),
  *          kaha (Hindi for 'where'), process, booth location, etc.
- * @param {string} text
- * @returns {boolean}
+ * @param {string} text - Input text
+ * @returns {boolean} True if guide query
  */
 function isGuideQuery(text) {
     const t = text.toLowerCase();
@@ -90,8 +96,8 @@ function isGuideQuery(text) {
 
 /**
  * Detect emotional/vent intent.
- * @param {string} text
- * @returns {boolean}
+ * @param {string} text - Input text
+ * @returns {boolean} True if vent query
  */
 function isVentQuery(text) {
     const t = text.toLowerCase();
@@ -134,14 +140,10 @@ const PREDEFINED_FACTS = {
     }
 };
 
-// ════════════════════════════════════════════════════════════════════════════
-// SAFE EXTRACTION HELPERS
-// ════════════════════════════════════════════════════════════════════════════
-
 /**
  * Safely extract text from a Vertex AI response object.
  * @param {object} result - Raw Vertex AI response
- * @returns {string}
+ * @returns {string} Extracted text
  */
 function safeText(result) {
     try {
@@ -195,7 +197,12 @@ async function processText(text) {
                 // Override AI if strong signals present
                 if (isGuideQuery(lower)) intent = 'GUIDE';
             } catch (e) {
-                console.warn('[Pipeline] AI intent detection failed, using heuristics.');
+                process.stdout.write(JSON.stringify({
+                    ts: new Date().toISOString(),
+                    level: 'WARN',
+                    context: 'IntentDetection',
+                    message: 'AI intent detection failed: ' + e.message
+                }) + '\n');
             }
         } else if (!mentionsElection(lower)) {
             // No AI available and not election-related
@@ -211,7 +218,12 @@ async function processText(text) {
             try {
                 extraction = await aiService.extractClaim(text);
             } catch (e) {
-                console.warn('[Pipeline] Claim extraction failed:', e.message);
+                process.stdout.write(JSON.stringify({
+                    ts: new Date().toISOString(),
+                    level: 'WARN',
+                    context: 'ClaimExtraction',
+                    message: 'Claim extraction failed: ' + e.message
+                }) + '\n');
             }
             if (!extraction?.claim && mentionsElection(lower)) {
                 extraction = { claim: normalizeClaim(text), confidence: 0.5, language: 'mixed' };
@@ -228,7 +240,13 @@ async function processText(text) {
         }
 
     } catch (err) {
-        console.error('[Pipeline] Unhandled error:', err);
+        process.stdout.write(JSON.stringify({
+            ts: new Date().toISOString(),
+            level: 'ERROR',
+            context: 'processText',
+            message: err.message,
+            stack: err.stack
+        }) + '\n');
         return {
             response: 'Something went wrong. Please try again.',
             intent: 'ERROR'
@@ -241,7 +259,10 @@ async function processText(text) {
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
- * VERIFY — Fact-check an election claim.
+ * VERIFY intent handler — Fact-check an election claim.
+ * @param {string} text - User input text
+ * @param {object} extraction - Extracted claim details
+ * @returns {Promise<object>} Structured response
  */
 async function handleVerify(text, extraction) {
     const normalized = normalizeClaim(text);
@@ -278,7 +299,12 @@ async function handleVerify(text, extraction) {
         const factCheck = await aiService.verifyClaim(extraction.claim, extraction.language || 'en');
         return formatVerifyResponse(factCheck);
     } catch (e) {
-        console.error('[handleVerify] AI verification failed:', e);
+        process.stdout.write(JSON.stringify({
+            ts: new Date().toISOString(),
+            level: 'ERROR',
+            context: 'handleVerify',
+            message: e.message
+        }) + '\n');
         return {
             response: 'Verification service is temporarily unavailable. Please visit eci.gov.in for official information.',
             intent: 'VERIFY'
@@ -287,7 +313,9 @@ async function handleVerify(text, extraction) {
 }
 
 /**
- * GUIDE — Explain how to vote / find booth / etc.
+ * GUIDE intent handler — Explain how to vote / find booth / etc.
+ * @param {string} text - User input text
+ * @returns {Promise<object>} Structured response
  */
 async function handleGuide(text) {
     // Static fallback (always works, even without AI)
@@ -319,13 +347,20 @@ async function handleGuide(text) {
         const aiText = safeText(result);
         return { response: aiText || staticGuide, intent: 'GUIDE' };
     } catch (e) {
-        console.error('[handleGuide] AI error, using static fallback:', e.message);
+        process.stdout.write(JSON.stringify({
+            ts: new Date().toISOString(),
+            level: 'WARN',
+            context: 'handleGuide',
+            message: 'AI error, using static fallback: ' + e.message
+        }) + '\n');
         return { response: staticGuide, intent: 'GUIDE' };
     }
 }
 
 /**
- * LEARN — Election education / civic awareness.
+ * LEARN intent handler — Election education / civic awareness.
+ * @param {string} text - User input text
+ * @returns {Promise<object>} Structured response
  */
 async function handleLearn(text) {
     const staticLearn =
@@ -354,7 +389,9 @@ async function handleLearn(text) {
 }
 
 /**
- * VENT — Calm reassurance for frustrated / worried voters.
+ * VENT intent handler — Calm reassurance for frustrated / worried voters.
+ * @param {string} text - User input text
+ * @returns {Promise<object>} Structured response
  */
 async function handleVent(text) {
     const staticVent =
@@ -392,8 +429,8 @@ const VERDICT_EMOJI = { TRUE: '✅', FALSE: '❌', MISLEADING: '⚠️', UNVERIF
 /**
  * Convert a fact-check data object into a structured API response
  * including a shareable WhatsApp-style card.
- * @param {object} data
- * @returns {object}
+ * @param {object} data - Fact-check result
+ * @returns {object} Formatted response
  */
 function formatVerifyResponse(data) {
     const emoji = VERDICT_EMOJI[data.verdict] || '🔍';
@@ -429,3 +466,4 @@ module.exports = {
     getGuide: handleGuide,
     getEducation: handleLearn
 };
+

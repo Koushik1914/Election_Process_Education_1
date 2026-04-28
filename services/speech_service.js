@@ -1,18 +1,33 @@
+'use strict';
+
 const speech = require('@google-cloud/speech');
 const textToSpeech = require('@google-cloud/text-to-speech');
-const fs = require('fs');
-const util = require('util');
+
+/**
+ * JanVoice AI — Speech Service
+ * Handles Speech-to-Text (STT) and Text-to-Speech (TTS) using Google Cloud APIs.
+ */
 
 const sttClient = new speech.SpeechClient();
 const ttsClient = new textToSpeech.TextToSpeechClient();
 
+/**
+ * Transcribe an audio buffer using Google Cloud Speech-to-Text.
+ * Supports English, Hindi, and Telugu.
+ * @param {Buffer} audioBuffer - Buffer containing audio data
+ * @returns {Promise<object>} Transcribed text or error object
+ */
 async function transcribe(audioBuffer) {
+    if (!audioBuffer || !Buffer.isBuffer(audioBuffer)) {
+        return { error: 'INVALID_INPUT_BUFFER' };
+    }
+
     try {
         const audioBytes = audioBuffer.toString('base64');
 
         const audio = { content: audioBytes };
         const config = {
-            encoding: 'WEBM_OPUS', // Default for browser recording, adjust as needed
+            encoding: 'WEBM_OPUS', // Default for browser recording
             sampleRateHertz: 48000,
             languageCode: 'en-IN',
             alternativeLanguageCodes: ['hi-IN', 'te-IN'],
@@ -31,12 +46,27 @@ async function transcribe(audioBuffer) {
 
         return { text: transcription };
     } catch (error) {
-        console.error('Speech-to-Text Error:', error);
+        process.stdout.write(JSON.stringify({
+            ts: new Date().toISOString(),
+            level: 'ERROR',
+            context: 'transcribe',
+            message: error.message
+        }) + '\n');
         throw error;
     }
 }
 
+/**
+ * Synthesize text into an audio buffer using Google Cloud Text-to-Speech.
+ * @param {string} text - Text to synthesize
+ * @param {string} languageCode - Target language code (default: en-IN)
+ * @returns {Promise<Buffer>} Audio content buffer
+ */
 async function synthesize(text, languageCode = 'en-IN') {
+    if (!text || typeof text !== 'string') {
+        throw new Error('Valid text is required for synthesis');
+    }
+
     try {
         const request = {
             input: { text },
@@ -47,7 +77,12 @@ async function synthesize(text, languageCode = 'en-IN') {
         const [response] = await ttsClient.synthesizeSpeech(request);
         return response.audioContent;
     } catch (error) {
-        console.error('Text-to-Speech Error:', error);
+        process.stdout.write(JSON.stringify({
+            ts: new Date().toISOString(),
+            level: 'ERROR',
+            context: 'synthesize',
+            message: error.message
+        }) + '\n');
         throw error;
     }
 }
@@ -56,3 +91,4 @@ module.exports = {
     transcribe,
     synthesize
 };
+

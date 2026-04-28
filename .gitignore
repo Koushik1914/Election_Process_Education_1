@@ -49,6 +49,6 @@ coverage/
 jest.config.js.bak
 .jest-cache/
 
-# ── Google Cloud ─────────────────────────────────────────────────────────────
-.gcloudignore
+# ── Google Cloud (local overrides only — cloudbuild.yaml is committed) ────────
 cloudbuild.yaml.local
+.gcloudignore
